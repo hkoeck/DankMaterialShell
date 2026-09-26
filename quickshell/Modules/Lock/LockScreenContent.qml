@@ -92,7 +92,7 @@ Item {
     }
 
     function canStartSecurityKeyUnlock() {
-        return !demoMode && pam && pam.u2f && pam.u2f.available && SettingsData.enableU2f && SettingsData.u2fMode === "or" && !pam.passwd.active && !pam.u2f.active && !pam.u2fPending && !root.unlocking;
+        return !demoMode && pam && pam.u2f && pam.u2f.available && SettingsData.enableU2f && SettingsData.u2fMode === "or" && !pam.authBusy && !pam.u2f.active && !pam.u2fPending && !root.unlocking;
     }
 
     function triggerSecurityKeyUnlock() {
@@ -667,7 +667,7 @@ Item {
                                     return Theme.tertiary;
                                 return passwordField.activeFocus ? Theme.primary : Theme.surfaceVariantText;
                             }
-                            opacity: pam.passwd.active ? 0 : 1
+                            opacity: pam.authBusy ? 0 : 1
 
                             Behavior on opacity {
                                 NumberAnimation {
@@ -790,8 +790,8 @@ Item {
                         activeFocusOnTab: !demoMode
                         onTextChanged: cursorPosition = text.length
                         onAccepted: {
-                            if (!demoMode && !root.unlocking && !pam.passwd.active && !pam.u2fPending) {
-                                pam.passwd.start();
+                            if (!demoMode && !root.unlocking && !pam.authBusy && !pam.u2fPending) {
+                                pam.submitPassword();
                             }
                         }
                         Keys.onPressed: event => handleKey(event)
@@ -824,7 +824,7 @@ Item {
                                 return;
                             }
 
-                            if (pam.passwd.active) {
+                            if (pam.authBusy) {
                                 log.debug("PAM is active, ignoring input");
                                 event.accepted = true;
                                 return;
@@ -943,7 +943,7 @@ Item {
                                     return;
                                 const committed = text;
                                 text = "";
-                                if (demoMode || root.unlocking || pam.passwd.active)
+                                if (demoMode || root.unlocking || pam.authBusy)
                                     return;
                                 passwordField.insertText(committed);
                             }
@@ -989,12 +989,16 @@ Item {
                                     return I18n.tr("Insert your security key...");
                                 return I18n.tr("Touch your security key...");
                             }
-                            if (pam.passwd.active) {
+                            if (pam.authBusy) {
                                 return I18n.tr("Authenticating...", "lock screen status text while the password is checked");
                             }
+                            // Show PAM's actual prompt (e.g. "PIN") when there is one, so
+                            // custom auth modules are not mislabelled as a password.
+                            if (pam.authPromptText !== "")
+                                return pam.authPromptText;
                             return I18n.tr("Password", "lock screen password field placeholder") + "…";
                         }
-                        color: root.unlocking ? Theme.primary : (pam.passwd.active ? Theme.primary : Theme.outline)
+                        color: root.unlocking ? Theme.primary : (pam.authBusy ? Theme.primary : Theme.outline)
                         font.pixelSize: Theme.fontSizeMedium
                         opacity: (demoMode || root.passwordBuffer.length === 0) ? 1 : 0
 
@@ -1104,7 +1108,7 @@ Item {
                             x: passwordDisplay.x + passwordDisplay.cursorRectangle.x
                             y: passwordDisplay.y + passwordDisplay.cursorRectangle.y
                             height: passwordDisplay.cursorRectangle.height
-                            shown: !demoMode && passwordField.activeFocus && !pam.passwd.active && !pam.u2fPending && !root.unlocking
+                            shown: !demoMode && passwordField.activeFocus && !pam.authBusy && !pam.u2fPending && !root.unlocking
 
                             readonly property int fieldCursorPosition: passwordField.cursorPosition
                             readonly property string fieldText: passwordField.text
@@ -1129,7 +1133,7 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         iconName: parent.showPassword ? "visibility_off" : "visibility"
                         buttonSize: Theme.buttonHeightXS
-                        visible: !demoMode && root.passwordBuffer.length > 0 && !pam.passwd.active && !root.unlocking
+                        visible: !demoMode && root.passwordBuffer.length > 0 && !pam.authBusy && !root.unlocking
                         enabled: visible
                         onClicked: parent.showPassword = !parent.showPassword
                     }
@@ -1164,7 +1168,7 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         iconName: "keyboard"
                         buttonSize: Theme.buttonHeightXS
-                        visible: !demoMode && !pam.passwd.active && !root.unlocking && !pam.u2fPending
+                        visible: !demoMode && !pam.authBusy && !root.unlocking && !pam.u2fPending
                         enabled: visible
                         onClicked: {
                             if (keyboardController.isKeyboardActive) {
@@ -1185,7 +1189,7 @@ Item {
                         height: Theme.iconSize
                         radius: Theme.fullRadius(width, height)
                         color: "transparent"
-                        visible: !demoMode && (pam.passwd.active || root.unlocking)
+                        visible: !demoMode && (pam.authBusy || root.unlocking)
 
                         DankIcon {
                             anchors.centerIn: parent
@@ -1206,7 +1210,7 @@ Item {
 
                         Item {
                             anchors.fill: parent
-                            visible: pam.passwd.active && !root.unlocking
+                            visible: pam.authBusy && !root.unlocking
 
                             Rectangle {
                                 width: Theme.iconSizeSmall
@@ -1237,7 +1241,7 @@ Item {
                                 }
 
                                 RotationAnimator on rotation {
-                                    running: pam.passwd.active && !root.unlocking
+                                    running: pam.authBusy && !root.unlocking
                                     loops: Animation.Infinite
                                     duration: Anims.durLong
                                     from: 0
@@ -1258,11 +1262,11 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         iconName: "keyboard_return"
                         buttonSize: Theme.buttonHeightXS
-                        visible: (demoMode || (!pam.passwd.active && !root.unlocking && !pam.u2fPending))
+                        visible: (demoMode || (!pam.authBusy && !root.unlocking && !pam.u2fPending))
                         enabled: !demoMode
                         onClicked: {
                             if (!demoMode && !root.unlocking && !pam.u2fPending) {
-                                pam.passwd.start();
+                                pam.submitPassword();
                             }
                         }
 
@@ -1399,6 +1403,14 @@ Item {
             lockerReadyArmed = false;
             passwordField.clear();
             root.unlockRequested();
+        }
+
+        // A new prompt within the same conversation (PIN rejected -> password)
+        // must not inherit the text typed for the previous one. onStateChanged
+        // only fires when the whole conversation ends, which is too late.
+        function onAwaitingUserInputChanged() {
+            if (root.pam.awaitingUserInput)
+                passwordField.clear();
         }
 
         function onStateChanged() {
