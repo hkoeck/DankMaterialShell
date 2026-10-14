@@ -13,6 +13,9 @@ Scope {
     readonly property var log: Log.scoped("Pam")
 
     property bool lockSecured: false
+    // the deliberate "I am here to unlock" gesture: a click on the shield or the first
+    // keystroke. GNOME opens its pam conversation at exactly this point, not on lock.
+    property bool inputRevealed: false
     property bool unlockInProgress: false
 
     readonly property alias passwd: passwd
@@ -30,7 +33,18 @@ Scope {
     property string authPromptText: ""
     property bool responseSubmitted: false
     property bool awaitingUserInput: false
-    readonly property bool authBusy: passwd.active && !root.awaitingUserInput
+    property bool responseInFlight: false
+    // the conversation is held open while the user types, so passwd.active is not "busy"
+    readonly property bool authBusy: passwd.active && root.responseInFlight
+    // prompts seen in the current conversation; the first one keeps what was typed
+    property int promptsSeen: 0
+    // answers sent in the current conversation; a success without one came from a module
+    // that authenticated on its own
+    property int promptsAnswered: 0
+    // a conversation nobody asked for may discover the prompt, but it may not unlock:
+    // only one started by a deliberate unlock intent is allowed to succeed passively
+    property bool passiveUnlockAllowed: false
+    property bool bufferWasEmpty: true
     property var attemptInfoMessages: []
     property bool lockoutAnnouncedThisAttempt: false
 
@@ -60,9 +74,51 @@ Scope {
         u2f.checkAvail();
     }
 
-    // start() runs every auth module before the first prompt (howdy, fprintd), so only on submit
+    // The conversation is opened as soon as the screen is locked, like hyprlock's auth thread
+    // and gnome's unlock dialog: pam is asked, the first prompt is held unanswered, and the
+    // field can show what it actually asked for instead of guessing "Password".
+    // allowPassiveUnlock says whether this conversation may complete on its own - see
+    // passiveUnlockAllowed. Nothing is submitted here, so no attempt is consumed.
+    function beginAuthSession(allowPassiveUnlock: bool): void {
+        if (passwd.active || root.unlockInProgress || !root.lockSecured)
+            return;
+        // the security key owns the attempt while it waits for a touch
+        if (root.u2fPending)
+            return;
+        root.passiveUnlockAllowed = allowPassiveUnlock === true;
+        root.responseSubmitted = false;
+        root.awaitingUserInput = false;
+        root.responseInFlight = false;
+        root.promptsAnswered = 0;
+        passwd.start();
+    }
+
+    // Someone is here and wants in: an open conversation may now succeed on its own, so a
+    // configured face or fingerprint module unlocks as intended - just not from locking.
+    function noteUnlockIntent(): void {
+        if (passwd.active) {
+            root.passiveUnlockAllowed = true;
+            return;
+        }
+        root.beginAuthSession(true);
+    }
+
+    onInputRevealedChanged: {
+        if (root.inputRevealed)
+            root.noteUnlockIntent();
+    }
+
+    // typing after a conversation ended (a failed attempt) has to reopen it
+    onBufferChanged: {
+        const wasEmpty = root.bufferWasEmpty;
+        root.bufferWasEmpty = root.buffer.length === 0;
+        if (wasEmpty && root.buffer.length > 0)
+            root.noteUnlockIntent();
+    }
+
     function submitPassword(): void {
         root.responseSubmitted = true;
+        root.passiveUnlockAllowed = true;
         if (!passwd.active) {
             passwd.start();
             return;
@@ -70,6 +126,8 @@ Scope {
         if (passwd.responseRequired) {
             root.responseSubmitted = false;
             root.awaitingUserInput = false;
+            root.responseInFlight = true;
+            root.promptsAnswered = root.promptsAnswered + 1;
             passwdActiveTimeout.restart();
             passwd.respond(root.buffer);
         } else {
@@ -232,6 +290,7 @@ Scope {
                 return;
 
             root.authPromptText = (message || "").replace(/:\s*$/, "").trim();
+            root.promptsSeen = root.promptsSeen + 1;
 
             const notice = root.attemptInfoMessages.filter(m => m !== message);
             if (notice.length > 0) {
@@ -244,9 +303,12 @@ Scope {
             if (root.responseSubmitted) {
                 root.responseSubmitted = false;
                 root.awaitingUserInput = false;
+                root.responseInFlight = true;
+                root.promptsAnswered = root.promptsAnswered + 1;
                 respond(root.buffer);
             } else {
                 root.awaitingUserInput = true;
+                root.responseInFlight = false;
                 passwdActiveTimeout.running = false;
             }
         }
@@ -264,6 +326,16 @@ Scope {
             }
 
             if (res === PamResult.Success) {
+                // A stack can authenticate without ever asking (face, fingerprint). In a
+                // conversation that only exists to learn the prompt, that is not an unlock
+                // request, so it is dropped and the screen stays locked. The next intent
+                // signal opens a conversation that is allowed to succeed this way.
+                if (root.promptsAnswered === 0 && !root.passiveUnlockAllowed) {
+                    root.log.info("Discarding unrequested authentication success");
+                    root.responseInFlight = false;
+                    root.awaitingUserInput = false;
+                    return;
+                }
                 if (!root.unlockInProgress) {
                     fprint.stop();
                     root.proceedAfterPrimaryAuth();
@@ -287,6 +359,7 @@ Scope {
                 root.state = "fail";
 
             root.responseSubmitted = false;
+            root.responseInFlight = false;
             root.flashMsg();
             stateReset.restart();
         }
@@ -298,6 +371,9 @@ Scope {
         function onActiveChanged() {
             root.authPromptText = "";
             root.awaitingUserInput = false;
+            root.promptsSeen = 0;
+            if (!passwd.active)
+                root.promptsAnswered = 0;
             if (passwd.active) {
                 root.attemptInfoMessages = [];
                 root.lockoutAnnouncedThisAttempt = false;
@@ -306,6 +382,7 @@ Scope {
                 else
                     passwdActiveTimeout.running = false;
             } else {
+                root.responseInFlight = false;
                 passwdActiveTimeout.running = false;
             }
         }
@@ -491,6 +568,9 @@ Scope {
             if (!available || !SettingsData.enableU2f || root.u2fSuppressedByPrimaryPam || SettingsData.u2fMode !== "or" || root.unlockInProgress || root.authBusy || active)
                 return;
             abort();
+            // the field is cleared for this, so an unanswered password conversation
+            // must not stay open behind it
+            passwd.abort();
             root.u2fPending = true;
             root.u2fPendingMode = "or";
             root.u2fState = "";
@@ -610,6 +690,16 @@ Scope {
     }
 
     Timer {
+        id: eagerStart
+
+        interval: 50
+        onTriggered: {
+            if (root.lockSecured && !root.unlockInProgress)
+                root.beginAuthSession(false);
+        }
+    }
+
+    Timer {
         id: passwdActiveTimeout
 
         interval: 15000
@@ -664,6 +754,12 @@ Scope {
         root.lockoutAnnouncedThisAttempt = false;
         root.resetAuthFlows();
         root.responseSubmitted = false;
+        root.responseInFlight = false;
+        root.promptsSeen = 0;
+        root.promptsAnswered = 0;
+        root.bufferWasEmpty = root.buffer.length === 0;
+        // learn the prompt right away; this conversation may not unlock by itself
+        eagerStart.restart();
         fprint.tries = 0;
         fprint.errorTries = 0;
         if (!SettingsData.lockPamExternallyManaged && !dankshellConfigWatcher.loaded && !userPamWatcher.loaded)
@@ -673,6 +769,19 @@ Scope {
         u2fConfigWatcher.reload();
         fprint.checkAvail();
         u2f.checkAvail();
+    }
+
+    Connections {
+        target: IdleService
+        enabled: root.lockSecured
+
+        // Someone coming back wakes the outputs before they type - the same kind of
+        // deliberate signal gnome gets from dismissing its shield, and it leaves a
+        // window to show what pam asked for before the first character.
+        function onMonitorsOffChanged(): void {
+            if (!IdleService.monitorsOff)
+                root.noteUnlockIntent();
+        }
     }
 
     Connections {

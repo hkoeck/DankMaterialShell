@@ -162,9 +162,11 @@ Item {
                 keyboardController.hide();
         }
 
-        // onStateChanged only fires when the conversation ends, too late between prompts
+        // onStateChanged only fires when the conversation ends, too late between prompts.
+        // The first prompt of a conversation keeps what the user has typed so far - it is
+        // what opened the conversation; only a later prompt must not inherit that answer.
         function onAwaitingUserInputChanged() {
-            if (root.pam.awaitingUserInput)
+            if (root.pam.awaitingUserInput && root.pam.promptsSeen > 1)
                 passwordField.clear();
         }
     }
@@ -1132,6 +1134,33 @@ Item {
         width: Math.max(parent.width, LockMetrics.passwordRowWidth)
         x: (parent.width - width) / 2
         spacing: Theme.spacingXS
+
+        StyledText {
+            id: authPromptLabel
+
+            width: parent.width
+            height: text.length > 0 ? implicitHeight : 0
+            text: {
+                if (root.demoMode || !root.pam || root.passwordBuffer.length === 0)
+                    return "";
+                if (root.pam.authPromptText === "" || !root.pam.awaitingUserInput)
+                    return "";
+                return root.pam.authPromptText;
+            }
+            color: Theme.outline
+            font.pixelSize: Theme.fontSizeSmall
+            horizontalAlignment: Text.AlignHCenter
+            elide: Text.ElideRight
+            opacity: text.length > 0 ? 1 : 0
+
+            Behavior on opacity {
+                NumberAnimation {
+                    duration: LockMetrics.effectsDuration
+                    easing.type: Easing.BezierSpline
+                    easing.bezierCurve: Theme.expressiveCurves.expressiveEffects
+                }
+            }
+        }
 
         StyledText {
             id: authFeedbackText
