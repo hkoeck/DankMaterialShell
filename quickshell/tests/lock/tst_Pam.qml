@@ -139,7 +139,7 @@ TestCase {
         compare(pam.fprint.configDirectory + "/" + pam.fprint.config, data.fprint);
         compare(pam.u2f.configDirectory + "/" + pam.u2f.config, data.u2f);
         tryCompare(pam.fprint, "status", data.fprintStatus);
-        pam.passwd.start();
+        pam.noteUnlockIntent();
         pam.passwd.finish(PamResult.Success);
         compare(pam.u2fPending, data.secondFactor);
         compare(pam.unlockInProgress, !data.secondFactor);
@@ -166,7 +166,7 @@ TestCase {
         const pam = lockedPam();
         SettingsData.enableU2f = true;
         pam.fprint.finish(PamResult.Error);
-        pam.passwd.start();
+        pam.noteUnlockIntent();
         pam.passwd.finish(PamResult.Success);
         verify(pam.u2fPending);
         verify(pam.u2f.active);
@@ -177,12 +177,29 @@ TestCase {
 
     function test_passwordRemainsUsableWhileFingerprintActive() {
         const pam = lockedPam();
-        pam.passwd.start();
+        pam.noteUnlockIntent();
         verify(pam.fprint.active);
         pam.passwd.finish(PamResult.Success);
         verify(pam.unlockInProgress);
         verify(!pam.fprint.active);
         verify(!pam.fprint.retrying);
+    }
+
+    function test_unrequestedSuccessDoesNotUnlock() {
+        const pam = lockedPam();
+        tryCompare(pam.passwd, "active", true);
+        verify(!pam.passiveUnlockAllowed);
+        pam.passwd.finish(PamResult.Success);
+        verify(!pam.unlockInProgress);
+    }
+
+    function test_successAfterUnlockIntentUnlocks() {
+        const pam = lockedPam();
+        tryCompare(pam.passwd, "active", true);
+        pam.noteUnlockIntent();
+        verify(pam.passiveUnlockAllowed);
+        pam.passwd.finish(PamResult.Success);
+        verify(pam.unlockInProgress);
     }
 
     function test_u2fCancellationResumesWithoutResettingBadScans() {
