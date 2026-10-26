@@ -197,6 +197,35 @@ TestCase {
         verify(!pam.unlockInProgress);
     }
 
+    function test_failedAttemptReopensTheConversation() {
+        const pam = lockedPam();
+        tryCompare(pam.passwd, "active", true);
+        const startsBefore = pam.passwd.starts;
+        // pam asked, the answer was wrong, the conversation is over
+        pam.passwd.message = "PIN";
+        pam.passwd.responseRequired = true;
+        pam.passwd.deliverMessage();
+        pam.buffer = "0000";
+        pam.submitPassword();
+        pam.passwd.finish(PamResult.Failed);
+        verify(!pam.passwd.active);
+        // without this the field falls back to "Password..." until the next keystroke
+        tryCompare(pam.passwd, "active", true);
+        compare(pam.passwd.starts, startsBefore + 1);
+        verify(!pam.passiveUnlockAllowed);
+    }
+
+    function test_stackThatNeverPromptsStopsBeingReopened() {
+        const pam = lockedPam();
+        tryCompare(pam.passwd, "active", true);
+        for (let i = 0; i < pam.maxAutoRestarts + 2; i++) {
+            pam.passwd.finish(PamResult.Failed);
+            wait(200);
+        }
+        compare(pam.passwd.starts, 1 + pam.maxAutoRestarts);
+        verify(!pam.passwd.active);
+    }
+
     function test_selfAuthenticatingStackGetsNoUnrequestedSession() {
         MockFiles.contents = {
             "/etc/pam.d/dankshell": "auth sufficient pam_howdy.so\nauth sufficient pam_unix.so nullok\nauth required pam_deny.so\n"

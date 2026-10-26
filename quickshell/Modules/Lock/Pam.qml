@@ -45,6 +45,10 @@ Scope {
     // a conversation nobody asked for may discover the prompt, but it may not unlock:
     // only one started by a deliberate unlock intent is allowed to succeed passively
     property bool passiveUnlockAllowed: false
+    // reopens per lock without a prompt in between, so a stack that fails without ever
+    // asking anything is not reopened forever
+    property int autoRestartCount: 0
+    readonly property int maxAutoRestarts: 3
     property bool bufferWasEmpty: true
     property var attemptInfoMessages: []
     property bool lockoutAnnouncedThisAttempt: false
@@ -395,6 +399,8 @@ Scope {
 
             root.authPromptText = (message || "").replace(/:\s*$/, "").trim();
             root.promptsSeen = root.promptsSeen + 1;
+            // a prompt that arrives is proof the stack asks something
+            root.autoRestartCount = 0;
 
             const notice = root.attemptInfoMessages.filter(m => m !== message);
             if (notice.length > 0) {
@@ -488,6 +494,14 @@ Scope {
             } else {
                 root.responseInFlight = false;
                 passwdActiveTimeout.running = false;
+                // A failed attempt ends the conversation, and with it the prompt: the
+                // field would fall back to "Password..." while pam is going to ask for
+                // the PIN again. Reopening it is what keeps the label honest, and it
+                // may no more unlock by itself than the one opened at lock time.
+                if (root.lockSecured && !root.unlockInProgress && !root.u2fPending && root.autoRestartCount < root.maxAutoRestarts) {
+                    root.autoRestartCount = root.autoRestartCount + 1;
+                    authRestart.restart();
+                }
             }
         }
     }
@@ -794,6 +808,16 @@ Scope {
     }
 
     Timer {
+        id: authRestart
+
+        interval: 150
+        onTriggered: {
+            if (root.lockSecured && !root.unlockInProgress)
+                root.beginAuthSession(false);
+        }
+    }
+
+    Timer {
         id: eagerStart
 
         interval: 50
@@ -862,6 +886,7 @@ Scope {
         root.promptsSeen = 0;
         root.promptsAnswered = 0;
         root.passiveUnlockAllowed = false;
+        root.autoRestartCount = 0;
         root.bufferWasEmpty = root.buffer.length === 0;
         // learn the prompt right away; this conversation may not unlock by itself
         eagerStart.restart();
