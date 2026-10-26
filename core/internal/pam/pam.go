@@ -489,6 +489,7 @@ type LockscreenPamServiceInfo struct {
 	HasAuth           bool   `json:"hasAuth"`
 	InlineFingerprint bool   `json:"inlineFingerprint"`
 	InlineU2f         bool   `json:"inlineU2f"`
+	InlineFaceAuth    bool   `json:"inlineFaceAuth"`
 }
 
 type LockscreenPamValidation struct {
@@ -497,6 +498,7 @@ type LockscreenPamValidation struct {
 	HasAuth           bool     `json:"hasAuth"`
 	InlineFingerprint bool     `json:"inlineFingerprint"`
 	InlineU2f         bool     `json:"inlineU2f"`
+	InlineFaceAuth    bool     `json:"inlineFaceAuth"`
 	MissingModules    []string `json:"missingModules"`
 	Warnings          []string `json:"warnings"`
 	Errors            []string `json:"errors"`
@@ -518,6 +520,10 @@ func defaultValidateDeps() lockscreenPamValidateDeps {
 	}
 }
 
+// Face recognition modules. Unlike pam_fprintd and pam_u2f these have no
+// dedicated context in the shell, so the only place they are seen is here.
+var faceAuthModules = []string{"pam_howdy", "pam_sentinel", "pam_face", "pam_gaze"}
+
 // lockscreenPamAnalysis is a non-destructive walk of a PAM service. Unlike
 // resolveService it detects (rather than strips) pam_fprintd/pam_u2f and
 // records unknown directives instead of hard-failing on them.
@@ -526,6 +532,7 @@ type lockscreenPamAnalysis struct {
 	hasAuth           bool
 	inlineFingerprint bool
 	inlineU2f         bool
+	inlineFaceAuth    bool
 	modules           []string
 	authModules       []string
 	unknownDirectives []string
@@ -608,6 +615,12 @@ func (r lockscreenPamResolver) analyzeInto(path string, filterType string, stack
 			if strings.Contains(field, "pam_u2f") {
 				acc.inlineU2f = true
 			}
+			for _, name := range faceAuthModules {
+				if strings.Contains(field, name) {
+					acc.inlineFaceAuth = true
+					break
+				}
+			}
 			if !foundModule && strings.HasSuffix(field, ".so") {
 				acc.modules = append(acc.modules, field)
 				if lineType == "auth" {
@@ -643,6 +656,7 @@ func listLockscreenPamServices(baseDirs []string, readFile func(string) ([]byte,
 			info.HasAuth = analysis.hasAuth
 			info.InlineFingerprint = analysis.inlineFingerprint
 			info.InlineU2f = analysis.inlineU2f
+			info.InlineFaceAuth = analysis.inlineFaceAuth
 		}
 		out = append(out, info)
 	}
@@ -695,6 +709,7 @@ func validateLockscreenPam(serviceName string, path string, deps lockscreenPamVa
 	result.HasAuth = analysis.hasAuth
 	result.InlineFingerprint = analysis.inlineFingerprint
 	result.InlineU2f = analysis.inlineU2f
+	result.InlineFaceAuth = analysis.inlineFaceAuth
 
 	if !analysis.hasAuth {
 		result.Errors = append(result.Errors, "no auth directives found after include resolution")

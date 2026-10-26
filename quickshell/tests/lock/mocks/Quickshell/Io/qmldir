@@ -1,4 +1,6 @@
 module Quickshell.Io
 FileView 1.0 FileView.qml
 singleton MockFiles 1.0 MockFiles.qml
+singleton MockProcesses 1.0 MockProcesses.qml
 Process 1.0 Process.qml
+StdioCollector 1.0 StdioCollector.qml

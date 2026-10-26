@@ -809,6 +809,36 @@ func TestValidateLockscreenPam(t *testing.T) {
 			t.Fatalf("expected double-prompt warnings, got %v", result.Warnings)
 		}
 	})
+
+	t.Run("face auth is detected through nested includes", func(t *testing.T) {
+		t.Parallel()
+
+		env := newPamTestEnv(t)
+		env.availableModules["pam_unix.so"] = true
+		env.availableModules["pam_howdy.so"] = true
+		env.writePamFile(t, "system-auth", "#%PAM-1.0\nauth sufficient pam_howdy.so\nauth sufficient pam_unix.so\naccount required pam_unix.so\n")
+		env.writePamFile(t, "login", "#%PAM-1.0\nauth substack system-auth\naccount include system-auth\n")
+		env.writePamFile(t, "dankshell", "#%PAM-1.0\nauth substack login\naccount include system-auth\n")
+
+		result := validateLockscreenPam("dankshell", "", env.validateDeps())
+		if !result.InlineFaceAuth {
+			t.Fatalf("expected face auth to be found two includes down, got %+v", result)
+		}
+
+		plain := validateLockscreenPam("system-auth", "", newFaceFreeEnv(t).validateDeps())
+		if plain.InlineFaceAuth {
+			t.Fatalf("expected no face auth for a password-only stack, got %+v", plain)
+		}
+	})
+}
+
+func newFaceFreeEnv(t *testing.T) *pamTestEnv {
+	t.Helper()
+
+	env := newPamTestEnv(t)
+	env.availableModules["pam_unix.so"] = true
+	env.writePamFile(t, "system-auth", "#%PAM-1.0\nauth sufficient pam_unix.so\naccount required pam_unix.so\n")
+	return env
 }
 
 func TestValidateLockscreenU2fPam(t *testing.T) {

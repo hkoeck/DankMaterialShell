@@ -33,9 +33,32 @@ TestCase {
         IdleService.monitorsOff = false;
     }
 
+    // The shell asks `dms auth validate` what the lock stack contains before it
+    // opens a conversation nobody asked for. Nothing runs processes in a test, so
+    // the answer is given here.
+    function reportStack(pam, flags) {
+        const report = JSON.stringify({
+            valid: true,
+            hasAuth: true,
+            inlineFingerprint: flags.fingerprint === true,
+            inlineU2f: flags.u2f === true,
+            inlineFaceAuth: flags.face === true
+        });
+        verify(MockProcesses.answer(["auth", "validate"], report, 0));
+        tryCompare(pam, "primaryPamKnown", true);
+    }
+
+    function passwordOnlyPam() {
+        const pam = createTemporaryObject(factory, tests);
+        verify(pam !== null);
+        reportStack(pam, {});
+        return pam;
+    }
+
     function lockedPam() {
         const pam = createTemporaryObject(factory, tests);
         verify(pam !== null);
+        reportStack(pam, {});
         pam.lockSecured = true;
         tryCompare(pam.fprint, "active", true);
         compare(pam.fprint.starts, 1);
@@ -191,6 +214,88 @@ TestCase {
         verify(!pam.passiveUnlockAllowed);
         pam.passwd.finish(PamResult.Success);
         verify(!pam.unlockInProgress);
+    }
+
+    function test_answerForAnOldQuestionIsNotUsed() {
+        const pam = createTemporaryObject(factory, tests);
+        // the stack the lock asks about changes while the first answer is in flight
+        SettingsData.lockPamPath = "/test/custom";
+        const stale = JSON.stringify({
+            valid: true,
+            hasAuth: true,
+            inlineFingerprint: false,
+            inlineU2f: false,
+            inlineFaceAuth: false
+        });
+        verify(MockProcesses.answer(["auth", "validate"], stale, 0));
+        // the answer belonged to the previous stack, so nothing is known yet
+        verify(!pam.primaryPamKnown);
+        verify(!pam.mayOpenUnrequestedSession);
+        // the new question is asked, and that answer counts
+        reportStack(pam, {
+            face: true
+        });
+        verify(!pam.mayOpenUnrequestedSession);
+        pam.lockSecured = true;
+        wait(150);
+        verify(!pam.passwd.active);
+    }
+
+    function test_reportWithoutFaceAuthFieldIsNotTrusted() {
+        const pam = createTemporaryObject(factory, tests);
+        // what an older dms answers: no inlineFaceAuth key at all
+        verify(MockProcesses.answer(["auth", "validate"], JSON.stringify({
+            valid: true,
+            hasAuth: true,
+            inlineFingerprint: false,
+            inlineU2f: false
+        }), 0));
+        tryCompare(pam, "primaryPamKnown", true);
+        verify(!pam.mayOpenUnrequestedSession);
+        pam.lockSecured = true;
+        wait(150);
+        verify(!pam.passwd.active);
+    }
+
+    function test_selfAuthenticatingStackGetsNoUnrequestedSession() {
+        const pam = createTemporaryObject(factory, tests);
+        reportStack(pam, {
+            face: true
+        });
+        pam.lockSecured = true;
+        verify(!pam.mayOpenUnrequestedSession);
+        wait(150);
+        verify(!pam.passwd.active);
+        // typing is an unlock intent, but it still must not run howdy
+        pam.buffer = "secret";
+        wait(100);
+        verify(!pam.passwd.active);
+        // a submit opens the conversation, exactly as it did before the eager start
+        pam.submitPassword();
+        verify(pam.passwd.active);
+    }
+
+    function test_fingerprintInThePrimaryStackGetsNoUnrequestedSession() {
+        const pam = createTemporaryObject(factory, tests);
+        reportStack(pam, {
+            fingerprint: true
+        });
+        pam.lockSecured = true;
+        verify(!pam.mayOpenUnrequestedSession);
+        wait(150);
+        verify(!pam.passwd.active);
+    }
+
+    function test_unknownStackIsTreatedAsSelfAuthenticatingUntilItAnswers() {
+        const pam = createTemporaryObject(factory, tests);
+        pam.lockSecured = true;
+        verify(!pam.primaryPamKnown);
+        wait(150);
+        verify(!pam.passwd.active);
+        // the stack is inspected asynchronously; the prompt is still worth having
+        reportStack(pam, {});
+        verify(pam.mayOpenUnrequestedSession);
+        tryCompare(pam.passwd, "active", true);
     }
 
     function test_successAfterUnlockIntentUnlocks() {

@@ -85,6 +85,9 @@ Scope {
         // the security key owns the attempt while it waits for a touch
         if (root.u2fPending)
             return;
+        // a stack that can authenticate on its own is only run on a submit
+        if (!root.mayOpenUnrequestedSession)
+            return;
         root.passiveUnlockAllowed = allowPassiveUnlock === true;
         root.responseSubmitted = false;
         root.awaitingUserInput = false;
@@ -96,16 +99,23 @@ Scope {
     // Someone is here and wants in: an open conversation may now succeed on its own, so a
     // configured face or fingerprint module unlocks as intended - just not from locking.
     function noteUnlockIntent(): void {
-        if (passwd.active) {
-            root.passiveUnlockAllowed = true;
-            return;
-        }
-        root.beginAuthSession(true);
+        // intent is recorded even where no conversation may be opened ahead of a
+        // submit: what it says is that the next success was asked for
+        root.passiveUnlockAllowed = true;
+        if (!passwd.active)
+            root.beginAuthSession(true);
     }
 
     onInputRevealedChanged: {
         if (root.inputRevealed)
             root.noteUnlockIntent();
+    }
+
+    // the stack is read asynchronously, so it can still be unknown when the screen
+    // locks; the prompt is worth a second look once it arrives
+    onMayOpenUnrequestedSessionChanged: {
+        if (root.mayOpenUnrequestedSession && root.lockSecured && !root.unlockInProgress && !passwd.active)
+            eagerStart.restart();
     }
 
     // typing after a conversation ended (a failed attempt) has to reopen it
@@ -215,6 +225,93 @@ Scope {
         printErrors: false
     }
 
+    // Whether the stack the password context will talk to carries a module that can
+    // authenticate on its own. Resolved by `dms auth validate`, which walks the
+    // includes properly (nested, cycle-safe) instead of guessing from the file here.
+    property bool primaryPamKnown: false
+    property bool primaryPamHasExternalAuth: false
+
+    // The service or path the password context resolves to, in the form the CLI wants.
+    readonly property var primaryPamQuery: {
+        if (AdminPolicy.disableCustomLockPam)
+            return ["--service", dankshellConfigWatcher.loaded ? "dankshell" : "login"];
+        if (root.customPamActive)
+            return ["--path", SettingsData.lockPamPath];
+        if (SettingsData.lockPamExternallyManaged)
+            return ["--service", "login"];
+        if (dankshellConfigWatcher.loaded)
+            return ["--service", "dankshell"];
+        if (userPamWatcher.loaded)
+            return ["--path", root.userPamDir + "/dankshell"];
+        // the bundled assets/pam/login: pam_unix and nothing else
+        return [];
+    }
+
+    // The settings can point the password context at another stack at any time, so an
+    // answer is only good for the question it was asked.
+    readonly property string primaryPamQueryKey: root.primaryPamQuery.join(" ")
+    property string inspectedQueryKey: ""
+
+    onPrimaryPamQueryChanged: root.inspectPrimaryPam()
+
+    function inspectPrimaryPam(): void {
+        if (root.primaryPamQuery.length === 0) {
+            root.inspectedQueryKey = "";
+            root.primaryPamHasExternalAuth = false;
+            root.primaryPamKnown = true;
+            return;
+        }
+        root.primaryPamKnown = false;
+        if (inspectPrimaryPamProcess.running)
+            inspectPrimaryPamProcess.running = false;
+        root.inspectedQueryKey = root.primaryPamQueryKey;
+        inspectPrimaryPamProcess.command = ["dms", "auth", "validate", "--purpose", "password", "--json"].concat(root.primaryPamQuery);
+        inspectPrimaryPamProcess.running = true;
+    }
+
+    Process {
+        id: inspectPrimaryPamProcess
+
+        running: false
+        stdout: StdioCollector {
+            onStreamFinished: {
+                // the question changed while this one was in flight
+                if (root.inspectedQueryKey !== root.primaryPamQueryKey) {
+                    root.inspectPrimaryPam();
+                    return;
+                }
+                try {
+                    const report = JSON.parse(text);
+                    // A dms that predates inlineFaceAuth cannot answer the question, and
+                    // silence is not a no: without it a face stack would look safe.
+                    if (!("inlineFaceAuth" in report)) {
+                        root.log.warn("This dms does not report face auth modules; leaving the conversation to a submit");
+                        root.primaryPamHasExternalAuth = true;
+                        root.primaryPamKnown = true;
+                        return;
+                    }
+                    root.primaryPamHasExternalAuth = report.inlineFingerprint === true || report.inlineU2f === true || report.inlineFaceAuth === true;
+                    root.primaryPamKnown = true;
+                } catch (e) {
+                    // an unreadable answer is treated like a stack that can self-authenticate
+                    root.log.warn("Could not read the lock PAM report:", e);
+                    root.primaryPamKnown = false;
+                }
+            }
+        }
+        onExited: exitCode => {
+            if (exitCode !== 0 && !root.primaryPamKnown)
+                root.log.warn("dms auth validate failed, leaving the conversation to a submit");
+        }
+    }
+
+    // Opening a conversation runs every module in the stack, so on a stack with a
+    // biometric or token module it costs a face scan or a reader touch the moment the
+    // screen locks - for a result that is then discarded. There the conversation waits
+    // for a submit, exactly as it did before. Until the stack is known the same applies.
+    // See #3775.
+    readonly property bool mayOpenUnrequestedSession: root.primaryPamKnown && !root.primaryPamHasExternalAuth
+
     // Fallback stack written by `dms auth resolve-lock` when no managed
     // /etc/pam.d/dankshell exists. See #2789.
     readonly property string userPamDir: Paths.strip(Paths.state) + "/pam"
@@ -243,7 +340,10 @@ Scope {
         resolveUserPam.running = true;
     }
 
-    Component.onCompleted: ensureUserPamConfig()
+    Component.onCompleted: {
+        ensureUserPamConfig();
+        inspectPrimaryPam();
+    }
 
     PamContext {
         id: passwd
@@ -757,6 +857,7 @@ Scope {
         root.responseInFlight = false;
         root.promptsSeen = 0;
         root.promptsAnswered = 0;
+        root.passiveUnlockAllowed = false;
         root.bufferWasEmpty = root.buffer.length === 0;
         // learn the prompt right away; this conversation may not unlock by itself
         eagerStart.restart();
