@@ -6,6 +6,7 @@ import Quickshell.Io
 import Quickshell.Services.Pam
 import qs.Common
 import qs.Services
+import "../../Common/PamStack.js" as PamStack
 
 Scope {
     id: root
@@ -85,6 +86,9 @@ Scope {
         // the security key owns the attempt while it waits for a touch
         if (root.u2fPending)
             return;
+        // a stack that can authenticate on its own is only run on a submit
+        if (!root.mayOpenUnrequestedSession)
+            return;
         root.passiveUnlockAllowed = allowPassiveUnlock === true;
         root.responseSubmitted = false;
         root.awaitingUserInput = false;
@@ -96,16 +100,23 @@ Scope {
     // Someone is here and wants in: an open conversation may now succeed on its own, so a
     // configured face or fingerprint module unlocks as intended - just not from locking.
     function noteUnlockIntent(): void {
-        if (passwd.active) {
-            root.passiveUnlockAllowed = true;
-            return;
-        }
-        root.beginAuthSession(true);
+        // intent is recorded even where no conversation may be opened ahead of a
+        // submit: what it says is that the next success was asked for
+        root.passiveUnlockAllowed = true;
+        if (!passwd.active)
+            root.beginAuthSession(true);
     }
 
     onInputRevealedChanged: {
         if (root.inputRevealed)
             root.noteUnlockIntent();
+    }
+
+    // the stack is read asynchronously, so it can still be unknown when the screen
+    // locks; the prompt is worth a second look once it arrives
+    onMayOpenUnrequestedSessionChanged: {
+        if (root.mayOpenUnrequestedSession && root.lockSecured && !root.unlockInProgress && !passwd.active)
+            eagerStart.restart();
     }
 
     // typing after a conversation ended (a failed attempt) has to reopen it
@@ -212,6 +223,99 @@ Scope {
         id: customU2fPamWatcher
 
         path: SettingsData.lockU2fPamPath !== "" ? SettingsData.lockU2fPamPath : ""
+        printErrors: false
+    }
+
+    readonly property string customPamText: customPamWatcher.loaded ? customPamWatcher.text() : ""
+    readonly property string dankshellPamText: dankshellConfigWatcher.loaded ? dankshellConfigWatcher.text() : ""
+    readonly property string userPamText: userPamWatcher.loaded ? userPamWatcher.text() : ""
+    readonly property string loginPamText: loginPamWatcher.loaded ? loginPamWatcher.text() : ""
+    readonly property string systemAuthPamText: systemAuthPamWatcher.loaded ? systemAuthPamWatcher.text() : ""
+    readonly property string passwordAuthPamText: passwordAuthPamWatcher.loaded ? passwordAuthPamWatcher.text() : ""
+    readonly property string commonAuthPamText: commonAuthPamWatcher.loaded ? commonAuthPamWatcher.text() : ""
+    readonly property string systemLoginPamText: systemLoginPamWatcher.loaded ? systemLoginPamWatcher.text() : ""
+    readonly property string systemLocalLoginPamText: systemLocalLoginPamWatcher.loaded ? systemLocalLoginPamWatcher.text() : ""
+    readonly property string commonAuthPcPamText: commonAuthPcPamWatcher.loaded ? commonAuthPcPamWatcher.text() : ""
+
+    // The bundled assets/pam/login: pam_unix and nothing else, so there is no stack
+    // on disk to read and nothing that could authenticate on its own.
+    readonly property bool primaryPamIsBundled: !AdminPolicy.disableCustomLockPam && !root.customPamActive && !SettingsData.lockPamExternallyManaged && !dankshellConfigWatcher.loaded && !userPamWatcher.loaded
+    // The stack the password context will talk to, resolved the same way passwd.config
+    // and passwd.configDirectory resolve it.
+    readonly property string primaryPamText: {
+        if (AdminPolicy.disableCustomLockPam)
+            return dankshellConfigWatcher.loaded ? root.dankshellPamText : root.loginPamText;
+        if (root.customPamActive)
+            return root.customPamText;
+        if (SettingsData.lockPamExternallyManaged)
+            return root.loginPamText;
+        if (dankshellConfigWatcher.loaded)
+            return root.dankshellPamText;
+        if (userPamWatcher.loaded)
+            return root.userPamText;
+        return "";
+    }
+    readonly property bool primaryPamKnown: root.primaryPamIsBundled || root.primaryPamText !== ""
+    // Modules that can authenticate without asking the user anything.
+    readonly property var externalAuthModules: ["pam_fprintd", "pam_u2f", "pam_howdy", "pam_sentinel", "pam_face", "pam_gaze"]
+    readonly property bool primaryPamHasExternalAuth: {
+        if (root.primaryPamIsBundled || root.primaryPamText === "")
+            return false;
+        const included = [["system-auth", root.systemAuthPamText], ["password-auth", root.passwordAuthPamText], ["common-auth", root.commonAuthPamText], ["system-login", root.systemLoginPamText], ["system-local-login", root.systemLocalLoginPamText], ["common-auth-pc", root.commonAuthPcPamText], ["login", root.loginPamText]];
+        return root.externalAuthModules.some(name => PamStack.stackHasModule(root.primaryPamText, included, name));
+    }
+    // Opening a conversation runs every module in the stack, so on a stack with a
+    // biometric or token module it costs a face scan or a reader touch the moment the
+    // screen locks - for a result that is then discarded. There the conversation waits
+    // for a submit, exactly as it did before. See #3775.
+    readonly property bool mayOpenUnrequestedSession: root.primaryPamKnown && !root.primaryPamHasExternalAuth
+
+    FileView {
+        id: loginPamWatcher
+
+        path: "/etc/pam.d/login"
+        printErrors: false
+    }
+
+    FileView {
+        id: systemAuthPamWatcher
+
+        path: "/etc/pam.d/system-auth"
+        printErrors: false
+    }
+
+    FileView {
+        id: passwordAuthPamWatcher
+
+        path: "/etc/pam.d/password-auth"
+        printErrors: false
+    }
+
+    FileView {
+        id: commonAuthPamWatcher
+
+        path: "/etc/pam.d/common-auth"
+        printErrors: false
+    }
+
+    FileView {
+        id: systemLoginPamWatcher
+
+        path: "/etc/pam.d/system-login"
+        printErrors: false
+    }
+
+    FileView {
+        id: systemLocalLoginPamWatcher
+
+        path: "/etc/pam.d/system-local-login"
+        printErrors: false
+    }
+
+    FileView {
+        id: commonAuthPcPamWatcher
+
+        path: "/etc/pam.d/common-auth-pc"
         printErrors: false
     }
 
@@ -757,6 +861,7 @@ Scope {
         root.responseInFlight = false;
         root.promptsSeen = 0;
         root.promptsAnswered = 0;
+        root.passiveUnlockAllowed = false;
         root.bufferWasEmpty = root.buffer.length === 0;
         // learn the prompt right away; this conversation may not unlock by itself
         eagerStart.restart();

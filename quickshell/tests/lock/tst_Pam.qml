@@ -28,6 +28,10 @@ TestCase {
         SettingsData.maxFprintTries = 2;
         AdminPolicy.disableCustomLockPam = false;
         MockFiles.missing = [];
+        // a plain password stack: nothing in it can authenticate on its own
+        MockFiles.contents = {
+            "/etc/pam.d/dankshell": "auth sufficient pam_unix.so nullok\nauth required pam_deny.so\n"
+        };
         Log.warnings = [];
         SessionService.preparingForSleep = false;
         IdleService.monitorsOff = false;
@@ -191,6 +195,51 @@ TestCase {
         verify(!pam.passiveUnlockAllowed);
         pam.passwd.finish(PamResult.Success);
         verify(!pam.unlockInProgress);
+    }
+
+    function test_selfAuthenticatingStackGetsNoUnrequestedSession() {
+        MockFiles.contents = {
+            "/etc/pam.d/dankshell": "auth sufficient pam_howdy.so\nauth sufficient pam_unix.so nullok\nauth required pam_deny.so\n"
+        };
+        const pam = createTemporaryObject(factory, tests);
+        pam.lockSecured = true;
+        verify(!pam.mayOpenUnrequestedSession);
+        wait(150);
+        verify(!pam.passwd.active);
+        // typing is an unlock intent, but it still must not run howdy
+        pam.buffer = "secret";
+        wait(100);
+        verify(!pam.passwd.active);
+        // a submit opens the conversation, exactly as it did before the eager start
+        pam.submitPassword();
+        verify(pam.passwd.active);
+    }
+
+    function test_selfAuthenticatingIncludedStackGetsNoUnrequestedSession() {
+        MockFiles.contents = {
+            "/etc/pam.d/dankshell": "auth substack password-auth\nauth required pam_deny.so\n",
+            "/etc/pam.d/password-auth": "auth sufficient pam_fprintd.so\nauth sufficient pam_unix.so nullok\n"
+        };
+        const pam = createTemporaryObject(factory, tests);
+        pam.lockSecured = true;
+        verify(!pam.mayOpenUnrequestedSession);
+        wait(150);
+        verify(!pam.passwd.active);
+    }
+
+    function test_unreadableStackIsTreatedAsSelfAuthenticatingUntilItLoads() {
+        MockFiles.contents = {};
+        const pam = createTemporaryObject(factory, tests);
+        pam.lockSecured = true;
+        verify(!pam.primaryPamKnown);
+        wait(150);
+        verify(!pam.passwd.active);
+        // the stack is read asynchronously; the prompt is still worth having
+        MockFiles.contents = {
+            "/etc/pam.d/dankshell": "auth sufficient pam_unix.so nullok\nauth required pam_deny.so\n"
+        };
+        verify(pam.mayOpenUnrequestedSession);
+        tryCompare(pam.passwd, "active", true);
     }
 
     function test_successAfterUnlockIntentUnlocks() {
