@@ -254,6 +254,9 @@ TestCase {
         verify(!pam.mayOpenUnrequestedSession);
         pam.lockSecured = true;
         wait(150);
+        verify(!pam.passwd.active);
+    }
+
     function test_failedAttemptReopensTheConversation() {
         const pam = lockedPam();
         tryCompare(pam.passwd, "active", true);
